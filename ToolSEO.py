@@ -9,21 +9,34 @@ import requests
 from tkinter import ttk, scrolledtext
 from PIL import Image, ImageTk
 
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
+
+def resource_path(relative_path):
+    """Trả về đường dẫn tuyệt đối đến file resource, hỗ trợ PyInstaller."""
+    try:
+        base_path = sys._MEIPASS
+    except:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+CHROMEDRIVER_PATH = resource_path("chromedriver.exe")
+ICON_PATH = resource_path("lytran.ico")
+AUTHOR_IMAGE_PATH = resource_path("lytran.jpg")
+
 # -------------------------------------------------------------------------------------------
 # Quản lý Proxy
 # -------------------------------------------------------------------------------------------
 class ProxyManager:
-    """
-    Lớp quản lý danh sách proxy và trạng thái xoay vòng proxy.
-    Mỗi proxy dạng (ip, port, protocol), xoay vòng sau mỗi vòng lặp nếu bật rotate_enabled.
-    """
     def __init__(self):
-        self.proxy_list = []      # [(ip, port, protocol), ...]
+        self.proxy_list = []
         self.rotate_enabled = False
         self.current_index = 0
 
     def load_from_text(self, text):
-        """Đọc danh sách proxy từ text, mỗi dòng: ip:port:protocol."""
         self.proxy_list.clear()
         self.current_index = 0
         lines = text.strip().split('\n')
@@ -36,11 +49,10 @@ class ProxyManager:
                 continue
             ip = parts[0].strip()
             port = parts[1].strip()
-            protocol = parts[2].strip().lower()  # "http", "socks5", ...
+            protocol = parts[2].strip().lower()
             self.proxy_list.append((ip, port, protocol))
 
     def get_next_proxy(self):
-        """Trả về proxy hiện tại, nếu rotate_enabled=True thì chuyển sang proxy kế tiếp."""
         if not self.proxy_list:
             return None
         proxy = self.proxy_list[self.current_index]
@@ -50,9 +62,6 @@ class ProxyManager:
 
 global_proxy_manager = ProxyManager()
 
-# -------------------------------------------------------------------------------------------
-# Kiểm tra IP
-# -------------------------------------------------------------------------------------------
 def check_ip_current():
     """Dùng requests để lấy IP hiện tại (không qua proxy)."""
     try:
@@ -64,53 +73,51 @@ def check_ip_current():
 # -------------------------------------------------------------------------------------------
 # Tạo WebDriver
 # -------------------------------------------------------------------------------------------
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
-
-def resource_path(relative_path):
-    """Trả về đường dẫn tuyệt đối đến file resource (hỗ trợ PyInstaller)."""
-    try:
-        base_path = sys._MEIPASS
-    except:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
-
-CHROMEDRIVER_PATH = resource_path("chromedriver.exe")
-ICON_PATH = resource_path("lytran.ico")
-AUTHOR_IMAGE_PATH = resource_path("lytran.jpg")
-
-def get_driver(proxy=None):
-    """
-    Tạo WebDriver Chrome ở chế độ ẩn danh, tắt geolocation, popup, ...
-    Nếu proxy != None, cấu hình ip:port:protocol vào Chrome.
-    """
+def get_driver(proxy=None, headless=False, w=360, h=740):
     options = webdriver.ChromeOptions()
+
+    # Giả lập user-agent
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
+    options.add_argument(f"user-agent={user_agent}")
+
     options.add_argument("--incognito")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("--disable-features=WebAssembly,TFLite")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--disable-geolocation")
+
     prefs = {"profile.default_content_setting_values.geolocation": 2}
     options.add_experimental_option("prefs", prefs)
 
     if proxy:
         ip, port, protocol = proxy
-        if protocol not in ["http", "socks4", "socks5"]:
+        if protocol not in ["http","socks4","socks5"]:
             protocol = "http"
         proxy_str = f"{protocol}://{ip}:{port}"
         options.add_argument(f"--proxy-server={proxy_str}")
 
+    if headless:
+        options.add_argument("--headless")
+        options.add_argument("--window-size=1920,1080")
+    else:
+        options.add_argument(f"--window-size={w},{h}")
+
+    # Giảm detection
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
     service = Service(CHROMEDRIVER_PATH)
     driver = webdriver.Chrome(service=service, options=options)
-    driver.set_window_size(360, 740)
+    # Ẩn navigator.webdriver
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined
+        })
+        """
+    })
     return driver
 
-# -------------------------------------------------------------------------------------------
-# Đóng popup "Để sau"
-# -------------------------------------------------------------------------------------------
 def close_location_popup(driver):
     time.sleep(2)
     for _ in range(5):
@@ -124,112 +131,178 @@ def close_location_popup(driver):
             return
         time.sleep(1)
 
-# -------------------------------------------------------------------------------------------
-# Cuộn trang
-# -------------------------------------------------------------------------------------------
 def scroll_like_user(driver, duration=5):
     end_time = time.time() + duration
     while time.time() < end_time:
         driver.execute_script("window.scrollBy(0, 400);")
-        time.sleep(random.uniform(1, 2))
+        time.sleep(random.uniform(1,2))
 
 # -------------------------------------------------------------------------------------------
-# Tìm domain
+# EXACT URL vs Domain
 # -------------------------------------------------------------------------------------------
-def search_and_scroll(driver, log_callback, keyword, domain, max_pages, reading_duration):
-    log_callback(f"Đang tìm '{domain}' với từ khóa '{keyword}' trên tối đa {max_pages} trang.")
+def search_exact_url(driver, log, keyword, exact_url, max_pages, read_time=60):
+    log(f"Tìm URL chính xác: {exact_url}, tối đa {max_pages} trang.")
     driver.get("https://www.google.com")
     close_location_popup(driver)
 
-    search_box = driver.find_element(By.NAME, "q")
-    search_box.send_keys(keyword)
-    time.sleep(random.uniform(1, 3))
-    search_box.send_keys(Keys.RETURN)
+    box = driver.find_element(By.NAME, "q")
+    box.send_keys(keyword)
+    time.sleep(random.uniform(1,3))
+    box.send_keys(Keys.RETURN)
     close_location_popup(driver)
-    
-    for page in range(1, max_pages + 1):
-        log_callback(f"🔎 Kiểm tra trang {page}...")
-        time.sleep(2)
-        scroll_like_user(driver, duration=5)
-        search_results = driver.find_elements(By.CSS_SELECTOR, "a")
-        for result in search_results:
-            link = result.get_attribute("href")
-            if link and domain in link:
-                log_callback(f"🔍 Tìm thấy {link} trên trang {page}, thực hiện click...")
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", result)
-                time.sleep(1)
-                actions = ActionChains(driver)
-                actions.move_to_element(result).click().perform()
 
-                start_time = time.time()
-                while time.time() - start_time < reading_duration:
-                    driver.execute_script("window.scrollBy(0, 500);")
-                    time.sleep(2)
-                log_callback("📖 Đọc xong. Dừng tìm kiếm.")
-                return
-        else:
-            next_buttons = driver.find_elements(By.XPATH, "//a[@id='pnnext']")
-            if next_buttons:
-                next_buttons[0].click()
-            else:
-                log_callback(f"⛔ Không tìm thấy '{domain}' ở trang {page}.")
+    for page in range(1, max_pages+1):
+        log(f"Trang {page}, tìm URL chính xác.")
+        time.sleep(2)
+        scroll_like_user(driver, 5)
+
+        found = None
+        links = driver.find_elements(By.CSS_SELECTOR, "a")
+        for lk in links:
+            href = lk.get_attribute("href")
+            if href and href.strip() == exact_url.strip():
+                found = lk
                 break
-    time.sleep(5)
+        if found:
+            log(f"✅ Thấy URL chính xác => {exact_url}, click...")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", found)
+            time.sleep(1)
+            ActionChains(driver).move_to_element(found).click().perform()
+
+            st = time.time()
+            while time.time() - st < read_time:
+                driver.execute_script("window.scrollBy(0,500);")
+                time.sleep(2)
+            log("Đã đọc URL chính xác xong, dừng.")
+            return
+        else:
+            nxt = driver.find_elements(By.XPATH, "//a[@id='pnnext']")
+            if nxt:
+                nxt[0].click()
+            else:
+                log("Hết trang, không thấy URL chính xác.")
+                break
+    time.sleep(2)
+    log("Kết thúc search_exact_url, không tìm thấy link.")
+
+def search_domain(driver, log, keyword, domain, max_pages, read_time=60):
+    log(f"Tìm tên miền '{domain}', tối đa {max_pages} trang.")
+    driver.get("https://www.google.com")
+    close_location_popup(driver)
+
+    box = driver.find_element(By.NAME, "q")
+    box.send_keys(keyword)
+    time.sleep(random.uniform(1,3))
+    box.send_keys(Keys.RETURN)
+    close_location_popup(driver)
+
+    for page in range(1, max_pages+1):
+        log(f"Trang {page}, tìm tên miền trong link.")
+        time.sleep(2)
+        scroll_like_user(driver, 5)
+
+        found = None
+        links = driver.find_elements(By.CSS_SELECTOR, "a")
+        for lk in links:
+            href = lk.get_attribute("href")
+            if href and domain in href:
+                found = lk
+                break
+
+        if found:
+            log(f"✅ Thấy '{domain}' => {found.get_attribute('href')}, Đang Click...")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", found)
+            time.sleep(1)
+            ActionChains(driver).move_to_element(found).click().perform()
+
+            st = time.time()
+            while time.time() - st < read_time:
+                driver.execute_script("window.scrollBy(0,500);")
+                time.sleep(2)
+            log("Đã đọc trang. Dừng.")
+            return
+        else:
+            nxt = driver.find_elements(By.XPATH, "//a[@id='pnnext']")
+            if nxt:
+                nxt[0].click()
+            else:
+                log(f"Hết trang => không thấy tên miền '{domain}'")
+                break
+    time.sleep(2)
+    log("Kết thúc tìm tên miền => không thấy link.")
 
 # -------------------------------------------------------------------------------------------
-# Thread tự động
+# Thread
 # -------------------------------------------------------------------------------------------
 class AutomationThread(threading.Thread):
-    def __init__(self, log_callback, stop_event, keyword, domain,
-                 max_pages, reading_duration, cycle_delay, cycle_count):
+    def __init__(self, log, stop_event,
+                 keyword, target_str,
+                 max_pages, read_time,
+                 loop_delay, loop_count,
+                 headless, w, h):
         super().__init__()
-        self.log_callback = log_callback
+        self.log = log
         self.stop_event = stop_event
-        self.keyword = keyword
-        self.domain = domain
+        self.keyword = keyword.strip()
+        self.target_str = target_str.strip()
         self.max_pages = max_pages
-        self.reading_duration = reading_duration
-        self.cycle_delay = cycle_delay
-        self.cycle_count = cycle_count  # 0 => vô hạn
+        self.read_time = read_time
+        self.loop_delay = loop_delay
+        self.loop_count = loop_count
+
+        self.headless = headless
+        self.w = w
+        self.h = h
+
+    def is_exact_url(self, text):
+        """Nếu user nhập 'http' => EXACT URL, ngược lại => domain."""
+        if text.startswith("http"):
+            return True
+        return False
 
     def run(self):
-        current_cycle = 0
-        while not self.stop_event.is_set() and (self.cycle_count == 0 or current_cycle < self.cycle_count):
-            current_cycle += 1
-            self.log_callback(f"▶ Bắt đầu chu kỳ (Vòng {current_cycle})...")
+        current_loop = 0
+        while not self.stop_event.is_set() and (self.loop_count == 0 or current_loop < self.loop_count):
+            current_loop += 1
+            self.log(f"▶ Bắt đầu vòng lặp thứ {current_loop}...")
 
-            # Lấy proxy nếu có & rotate_enabled
             proxy = None
             if global_proxy_manager.proxy_list and global_proxy_manager.rotate_enabled:
                 proxy = global_proxy_manager.get_next_proxy()
-                self.log_callback(f"⇒ Đang dùng Proxy: {proxy}")
+                self.log(f"⇒ Đang dùng Proxy: {proxy}")
 
-            driver = get_driver(proxy=proxy)
+            driver = get_driver(proxy=proxy, headless=self.headless, w=self.w, h=self.h)
             try:
-                search_and_scroll(driver, self.log_callback,
-                                  self.keyword, self.domain,
-                                  self.max_pages, self.reading_duration)
+                if self.is_exact_url(self.target_str):
+                    # EXACT URL
+                    search_exact_url(driver, self.log, self.keyword, self.target_str,
+                                     self.max_pages, self.read_time)
+                else:
+                    # Domain
+                    dom = self.target_str.replace("https://","").replace("http://","")
+                    search_domain(driver, self.log, self.keyword, dom,
+                                  self.max_pages, self.read_time)
             except Exception as e:
-                self.log_callback(f"❌ Lỗi: {e}")
+                self.log(f"❌ Lỗi xảy ra: {e}")
             finally:
                 driver.quit()
-            self.log_callback(f"⏳ Chu kỳ hoàn thành. Nghỉ {self.cycle_delay} giây...")
 
-            for _ in range(self.cycle_delay):
+            self.log(f"⏳ Vòng {current_loop} hoàn thành, nghỉ {self.loop_delay}s...")
+            for _ in range(self.loop_delay):
                 if self.stop_event.is_set():
                     break
                 time.sleep(1)
-        self.log_callback("✋ Tự động dừng lại.")
+        self.log("✋ Kết thúc vòng lặp.")
 
 # -------------------------------------------------------------------------------------------
-# Giao diện
+# GUI
 # -------------------------------------------------------------------------------------------
 class AutomationGUI:
     def __init__(self, master):
         self.master = master
-        self.master.title("Tool SEO")
-        self.master.geometry("700x680")
-        self.master.resizable(False, False)
+        self.master.title("Công cụ SEO v1.0.2")
+        self.master.geometry("800x740")
+        self.master.resizable(False,False)
 
         try:
             self.master.iconbitmap(ICON_PATH)
@@ -240,13 +313,8 @@ class AutomationGUI:
         self.style.theme_use("clam")
         self.style.configure("Main.TFrame", background="#f0f0f0")
         self.style.configure("Header.TFrame", background="#007ACC")
-        self.style.configure("Header.TLabel", background="#007ACC", foreground="white", font=("Helvetica", 16, "bold"))
-        self.style.configure("SubHeader.TLabel", background="#007ACC", foreground="white", font=("Helvetica", 10))
-        self.style.configure("TButton", font=("Helvetica", 12), padding=5)
-        self.style.map("TButton",
-            foreground=[("active", "#005A8C")],
-            background=[("active", "#e0e0e0")]
-        )
+        self.style.configure("Header.TLabel", background="#007ACC", foreground="white", font=("Helvetica",16,"bold"))
+        self.style.configure("SubHeader.TLabel", background="#007ACC", foreground="white", font=("Helvetica",10))
 
         self.main_frame = ttk.Frame(self.master, style="Main.TFrame")
         self.main_frame.pack(fill="both", expand=True)
@@ -255,280 +323,334 @@ class AutomationGUI:
         self.header_frame = ttk.Frame(self.main_frame, style="Header.TFrame")
         self.header_frame.pack(fill="x")
 
-        # Ảnh tác giả
         try:
-            author_img = Image.open(AUTHOR_IMAGE_PATH)
-            # Sửa ANTIALIAS => Image.LANCZOS
-            author_img = author_img.resize((60, 60), Image.LANCZOS)
-            self.author_photo = ImageTk.PhotoImage(author_img)
-            self.img_label = ttk.Label(self.header_frame, image=self.author_photo, style="Header.TLabel")
+            im = Image.open(AUTHOR_IMAGE_PATH)
+            im = im.resize((60,60),Image.LANCZOS)
+            im_ph = ImageTk.PhotoImage(im)
+            self.img_label = ttk.Label(self.header_frame, image=im_ph, style="Header.TLabel")
+            self.img_label.image = im_ph
             self.img_label.pack(side="left", padx=10, pady=10)
-        except Exception as e:
-            print("Không tải được ảnh tác giả:", e)
+        except:
+            pass
 
-        self.title_label = ttk.Label(self.header_frame, text="Tool SEO", style="Header.TLabel")
+        self.title_label = ttk.Label(self.header_frame,
+                                     text="Công cụ SEO - Đẩy từ khóa lên top",
+                                     style="Header.TLabel")
         self.title_label.pack(anchor="w", padx=5, pady=5)
 
         self.sub_label = ttk.Label(self.header_frame,
-                                   text="Tác giả: Lý Trần\nLiên hệ: Zalo",
+                                   text="Phiên bản 1.0.2 Dev Lý Trần",
                                    style="SubHeader.TLabel")
         self.sub_label.pack(anchor="w", padx=5, pady=5)
 
-        self.zalo_link = ttk.Label(self.header_frame, text="(Mở Zalo)", foreground="white",
-                                   cursor="hand2", style="SubHeader.TLabel")
-        self.zalo_link.pack(anchor="w", padx=5)
-        self.zalo_link.bind("<Button-1>", lambda e: webbrowser.open("https://zalo.me/+84876437046"))
-
-        # Cấu hình
+        # Khung cấu hình
         config_frame = ttk.Frame(self.main_frame, style="Main.TFrame")
-        config_frame.pack(fill="x", padx=10, pady=(0, 10))
+        config_frame.pack(fill="x", padx=10, pady=(0,10))
 
-        # Thông số
-        tk.Label(config_frame, text="Từ khóa tìm kiếm:", font=("Helvetica", 10), background="#f0f0f0")\
-            .grid(row=0, column=0, sticky="e", padx=5, pady=5)
-        self.keyword_var = tk.StringVar(value="Nulled Congnghe360")
-        tk.Entry(config_frame, textvariable=self.keyword_var, width=30, font=("Helvetica", 10))\
-            .grid(row=0, column=1, sticky="w", padx=5, pady=5)
+        row_i = 0
+        # Từ khóa
+        tk.Label(config_frame,text="Từ khóa Google:",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
+        self.keyword_var = tk.StringVar(value="Shop trái cây")
+        tk.Entry(config_frame,textvariable=self.keyword_var,width=35,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
 
-        tk.Label(config_frame, text="Domain cần tìm:", font=("Helvetica", 10), background="#f0f0f0")\
-            .grid(row=1, column=0, sticky="e", padx=5, pady=5)
-        self.domain_var = tk.StringVar(value="congnghe360.com")
-        tk.Entry(config_frame, textvariable=self.domain_var, width=30, font=("Helvetica", 10))\
-            .grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        # Tên miền / EXACT URL
+        tk.Label(config_frame,text="Tên miền/link:",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
+        self.target_var = tk.StringVar(value="ngonfruit.com")
+        tk.Entry(config_frame,textvariable=self.target_var,width=45,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
 
-        tk.Label(config_frame, text="Số trang tìm tối đa:", font=("Helvetica", 10), background="#f0f0f0")\
-            .grid(row=2, column=0, sticky="e", padx=5, pady=5)
+        # Số trang tối đa
+        tk.Label(config_frame,text="Số trang tìm:",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
         self.max_pages_var = tk.StringVar(value="5")
-        tk.Entry(config_frame, textvariable=self.max_pages_var, width=5, font=("Helvetica", 10))\
-            .grid(row=2, column=1, sticky="w", padx=5, pady=5)
+        tk.Entry(config_frame,textvariable=self.max_pages_var,width=5,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
 
-        tk.Label(config_frame, text="Thời gian xem trang (s):", font=("Helvetica", 10), background="#f0f0f0")\
-            .grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        self.reading_duration_var = tk.StringVar(value="60")
-        tk.Entry(config_frame, textvariable=self.reading_duration_var, width=5, font=("Helvetica", 10))\
-            .grid(row=3, column=1, sticky="w", padx=5, pady=5)
+        # Thời gian xem trang
+        tk.Label(config_frame,text="Thời gian xem trang (s):",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
+        self.read_time_var = tk.StringVar(value="45")
+        tk.Entry(config_frame,textvariable=self.read_time_var,width=5,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
 
-        tk.Label(config_frame, text="Thời gian nghỉ vòng lặp (s):", font=("Helvetica", 10), background="#f0f0f0")\
-            .grid(row=4, column=0, sticky="e", padx=5, pady=5)
-        self.cycle_delay_var = tk.StringVar(value="30")
-        tk.Entry(config_frame, textvariable=self.cycle_delay_var, width=5, font=("Helvetica", 10))\
-            .grid(row=4, column=1, sticky="w", padx=5, pady=5)
+        # Thời gian nghỉ
+        tk.Label(config_frame,text="Thời gian nghỉ giữa các vòng (s):",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
+        self.loop_delay_var = tk.StringVar(value="120")
+        tk.Entry(config_frame,textvariable=self.loop_delay_var,width=5,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
 
-        tk.Label(config_frame, text="Số vòng lặp (0: vô hạn):", font=("Helvetica", 10), background="#f0f0f0")\
-            .grid(row=5, column=0, sticky="e", padx=5, pady=5)
-        self.cycle_count_var = tk.StringVar(value="0")
-        tk.Entry(config_frame, textvariable=self.cycle_count_var, width=5, font=("Helvetica", 10))\
-            .grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        # Số vòng lặp
+        tk.Label(config_frame,text="Số vòng lặp (0 = vô hạn):",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
+        self.loop_count_var = tk.StringVar(value="0")
+        tk.Entry(config_frame,textvariable=self.loop_count_var,width=5,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
 
-        # Log
-        self.log_frame = ttk.Frame(self.main_frame, style="Main.TFrame")
+        # Kích thước tab
+        tk.Label(config_frame,text="Kích thước tab (Rộng x Dài):",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=0,sticky="e",padx=5,pady=5)
+        self.win_w_var=tk.StringVar(value="740")
+        self.win_h_var=tk.StringVar(value="740")
+        tk.Entry(config_frame,textvariable=self.win_w_var,width=6,font=("Helvetica",10))\
+            .grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        tk.Label(config_frame,text="x",font=("Helvetica",10),bg="#f0f0f0")\
+            .grid(row=row_i,column=2,sticky="w")
+        tk.Entry(config_frame,textvariable=self.win_h_var,width=6,font=("Helvetica",10))\
+            .grid(row=row_i,column=3,sticky="w",padx=2,pady=5)
+        row_i+=1
+
+        # Chạy ẩn
+        self.headless_var=tk.BooleanVar(value=False)
+        hd_check=ttk.Checkbutton(config_frame,text="Chạy ẩn",variable=self.headless_var)
+        hd_check.grid(row=row_i,column=1,sticky="w",padx=5,pady=5)
+        row_i+=1
+
+        # Khu vực log
+        self.log_frame=ttk.Frame(self.main_frame, style="Main.TFrame")
         self.log_frame.pack(fill="both", expand=True, padx=10, pady=(0,10))
-        self.log_text = scrolledtext.ScrolledText(self.log_frame, wrap=tk.WORD, width=80,
-                                                  height=15, font=("Helvetica", 10))
+
+        self.log_text=scrolledtext.ScrolledText(self.log_frame, wrap=tk.WORD, width=100, height=15, font=("Helvetica",10))
         self.log_text.pack(fill="both", expand=True)
 
         # Nút
-        self.button_frame = ttk.Frame(self.main_frame, style="Main.TFrame")
-        self.button_frame.pack(fill="x", pady=(0,10))
+        self.btn_frame=ttk.Frame(self.main_frame, style="Main.TFrame")
+        self.btn_frame.pack(fill="x", pady=(0,10))
 
-        self.start_button = ttk.Button(self.button_frame, text="Bắt Đầu", command=self.start_automation)
-        self.start_button.pack(side="left", padx=20)
+        self.start_btn=ttk.Button(self.btn_frame,text="Bắt Đầu",command=self.start_automation)
+        self.start_btn.pack(side="left", padx=5)
 
-        self.stop_button = ttk.Button(self.button_frame, text="Kết Thúc",
-                                      command=self.stop_automation, state="disabled")
-        self.stop_button.pack(side="left", padx=20)
+        self.stop_btn=ttk.Button(self.btn_frame,text="Dừng",command=self.stop_automation,state="disabled")
+        self.stop_btn.pack(side="left", padx=5)
 
-        self.info_button = ttk.Button(self.button_frame, text="Info", command=self.show_info)
-        self.info_button.pack(side="left", padx=20)
+        self.reset_btn=ttk.Button(self.btn_frame,text="Khôi Phục",command=self.reset_form)
+        self.reset_btn.pack(side="left", padx=5)
 
-        self.proxy_button = ttk.Button(self.button_frame, text="Đổi Proxy", command=self.show_proxy_config)
-        self.proxy_button.pack(side="left", padx=20)
+        self.info_btn=ttk.Button(self.btn_frame,text="Thông Tin",command=self.show_info)
+        self.info_btn.pack(side="left", padx=5)
 
-        self.automation_thread = None
-        self.stop_event = threading.Event()
+        self.proxy_btn=ttk.Button(self.btn_frame,text="Đổi Proxy",command=self.show_proxy_config)
+        self.proxy_btn.pack(side="left", padx=5)
 
-    def log(self, message):
-        timestamp = time.strftime('%H:%M:%S')
-        self.log_text.insert(tk.END, f"{timestamp} - {message}\n")
+        self.automation_thread=None
+        self.stop_event=threading.Event()
+
+    def log(self, msg):
+        ts=time.strftime("%H:%M:%S")
+        self.log_text.insert(tk.END, f"{ts} - {msg}\n")
         self.log_text.see(tk.END)
 
     def start_automation(self):
         if self.automation_thread is None or not self.automation_thread.is_alive():
-            keyword = self.keyword_var.get().strip()
-            domain = self.domain_var.get().strip()
+            kw=self.keyword_var.get().strip()
+            tgt=self.target_var.get().strip()
             try:
-                max_pages = int(self.max_pages_var.get().strip())
+                mp=int(self.max_pages_var.get().strip())
             except:
-                max_pages = 3
+                mp=5
             try:
-                reading_duration = int(self.reading_duration_var.get().strip())
+                rt=int(self.read_time_var.get().strip())
             except:
-                reading_duration = 60
+                rt=60
             try:
-                cycle_delay = int(self.cycle_delay_var.get().strip())
+                ld=int(self.loop_delay_var.get().strip())
             except:
-                cycle_delay = 30
+                ld=30
             try:
-                cycle_count = int(self.cycle_count_var.get().strip())
+                lc=int(self.loop_count_var.get().strip())
             except:
-                cycle_count = 0
+                lc=0
+            hd=self.headless_var.get()
+            try:
+                w=int(self.win_w_var.get().strip())
+                h=int(self.win_h_var.get().strip())
+            except:
+                w,h=360,740
 
             self.stop_event.clear()
             self.automation_thread = AutomationThread(
-                self.log, self.stop_event,
-                keyword, domain, max_pages,
-                reading_duration, cycle_delay,
-                cycle_count
+                log=self.log,
+                stop_event=self.stop_event,
+                keyword=kw,
+                target_str=tgt,
+                max_pages=mp,
+                read_time=rt,
+                loop_delay=ld,
+                loop_count=lc,
+                headless=hd,
+                w=w,
+                h=h
             )
             self.automation_thread.start()
-            self.log("▶ Tự động bắt đầu.")
-            self.start_button.config(state="disabled")
-            self.stop_button.config(state="normal")
+            self.log("▶ Bắt đầu quá trình tự động...")
+            self.start_btn.config(state="disabled")
+            self.stop_btn.config(state="normal")
 
     def stop_automation(self):
         self.stop_event.set()
-        self.log("✋ Dừng tự động... Đóng tất cả các tab và thoát chương trình.")
-        self.start_button.config(state="normal")
-        self.stop_button.config(state="disabled")
+        self.log("✋ Dừng quá trình... Sẽ đóng tab nếu đang chạy.")
+        self.start_btn.config(state="normal")
+        self.stop_btn.config(state="disabled")
         if self.automation_thread is not None:
             self.automation_thread.join(timeout=5)
-        self.master.destroy()
-        sys.exit(0)
+
+    def reset_form(self):
+        """Nút Reset: dừng thread, xóa log, khôi phục giá trị mặc định."""
+        self.stop_automation()
+        # Xoá log
+        self.log_text.delete("1.0", tk.END)
+
+        # Thiết lập lại
+        self.keyword_var.set("Shop trái cây")
+        self.target_var.set("ngonfruit.com")
+        self.max_pages_var.set("5")
+        self.read_time_var.set("45")
+        self.loop_delay_var.set("120")
+        self.loop_count_var.set("0")
+        self.win_w_var.set("740")
+        self.win_h_var.set("740")
+        self.headless_var.set(False)
+
+        self.log("Đã khôi phục về giá trị mặc định.")
 
     def show_info(self):
-        info_win = tk.Toplevel(self.master)
-        info_win.title("Thông tin Tool SEO")
-        info_win.geometry("460x460")
-        info_win.resizable(False, False)
+        info_win=tk.Toplevel(self.master)
+        info_win.title("Thông tin")
+        info_win.geometry("345x345")
+        info_win.resizable(False,False)
         try:
             info_win.iconbitmap(ICON_PATH)
         except:
             pass
 
-        style2 = ttk.Style(info_win)
+        style2=ttk.Style(info_win)
         style2.theme_use("clam")
         style2.configure("InfoFrame.TFrame", background="#FFFFFF")
         style2.configure("InfoTitle.TLabel", background="#0066CC", foreground="white",
-                         font=("Helvetica", 13, "bold"))
-        style2.configure("InfoBody.TLabel", background="#FFFFFF", foreground="#333333",
-                         font=("Helvetica", 10))
-        style2.configure("InfoButton.TButton", font=("Helvetica", 10), padding=5)
+                         font=("Helvetica",13,"bold"))
+        style2.configure("InfoBody.TLabel", background="#FFFFFF", foreground="#333333", font=("Helvetica",10))
+        style2.configure("InfoButton.TButton", font=("Helvetica",10), padding=5)
 
-        header_info = ttk.Frame(info_win, style="InfoFrame.TFrame")
-        header_info.pack(fill="x")
-        title_label = ttk.Label(header_info, text="Thông tin Tool SEO", style="InfoTitle.TLabel")
-        title_label.pack(fill="x", pady=10, padx=10)
+        head=ttk.Frame(info_win, style="InfoFrame.TFrame")
+        head.pack(fill="x")
+        lbl_title=ttk.Label(head, text="Công Cụ Đẩy Từ Khóa Lên Top Google!", style="InfoTitle.TLabel")
+        lbl_title.pack(fill="x", pady=10, padx=10)
 
-        content_info = ttk.Frame(info_win, style="InfoFrame.TFrame", padding=10)
-        content_info.pack(fill="both", expand=True)
+        body=ttk.Frame(info_win, style="InfoFrame.TFrame", padding=10)
+        body.pack(fill="both", expand=True)
 
         try:
-            author_img = Image.open(AUTHOR_IMAGE_PATH)
-            author_img = author_img.resize((100, 100), Image.LANCZOS)
-            author_photo = ImageTk.PhotoImage(author_img)
-            img_label = ttk.Label(content_info, image=author_photo, style="InfoBody.TLabel")
-            img_label.image = author_photo
-            img_label.pack(pady=(0, 10))
+            im=Image.open(AUTHOR_IMAGE_PATH)
+            im=im.resize((100,100),Image.LANCZOS)
+            im_ph=ImageTk.PhotoImage(im)
+            lbl_im=ttk.Label(body, image=im_ph, style="InfoBody.TLabel")
+            lbl_im.image=im_ph
+            lbl_im.pack(pady=(0,10))
         except:
             pass
 
-        info_text = (
-            "Tool SEO\n\n"
-            "Tác giả: Lý Trần\n"
-            "Hướng dẫn sử dụng:\n"
-            "- Nhập từ khóa tìm kiếm, domain cần tìm, số trang.\n"
-            "- Thời gian xem trang, nghỉ vòng lặp, số vòng.\n"
-            "- Nhấn 'Bắt Đầu' => Tool chạy.\n"
-            "- Khi domain tìm thấy => click & cuộn.\n"
-            "- Nhấn 'Kết Thúc' => đóng tất cả tab.\n"
+        info_text=(
+            "Công cụ SEO - v1.0.2 Dev Lý Trần\n"
+            "Hỗ trợ:\n"
+            "- Chạy ẩn hoặc hiển thị.\n"
+            "- Tùy chỉnh kích thước tab.\n"
+            "- Tích hợp proxy + xoay vòng.\n"
+            "- Nút Khôi Phục để xóa log và khôi phục giá trị.\n\n"
+            "Chúc bạn sử dụng hiệu quả!"
         )
-        info_label = ttk.Label(content_info, text=info_text, style="InfoBody.TLabel", justify="left")
-        info_label.pack(pady=5)
+        lbl_body=ttk.Label(body, text=info_text, style="InfoBody.TLabel", justify="left")
+        lbl_body.pack(pady=5)
 
-        link_label = ttk.Label(content_info, text="Liên hệ: Zalo", style="InfoBody.TLabel",
-                               foreground="blue", cursor="hand2")
-        link_label.pack()
-        link_label.bind("<Button-1>", lambda e: webbrowser.open("https://zalo.me/+84876437046"))
+        lbl_ct=ttk.Label(body,text="Liên hệ: Zalo",style="InfoBody.TLabel",foreground="blue",cursor="hand2")
+        lbl_ct.pack()
+        lbl_ct.bind("<Button-1>", lambda e: webbrowser.open("https://zalo.me/+84876437046"))
 
-        close_btn = ttk.Button(content_info, text="Đóng", style="InfoButton.TButton",
-                               command=info_win.destroy)
-        close_btn.pack(pady=(15,0))
+        btn_close=ttk.Button(body, text="Đóng", style="InfoButton.TButton", command=info_win.destroy)
+        btn_close.pack(pady=(15,0))
 
-    # ---------------------------------------------------------------------------------------
-    # Cửa sổ Đổi Proxy
-    # ---------------------------------------------------------------------------------------
     def show_proxy_config(self):
-        proxy_win = tk.Toplevel(self.master)
+        proxy_win=tk.Toplevel(self.master)
         proxy_win.title("Cấu hình Proxy")
         proxy_win.geometry("500x400")
-        proxy_win.resizable(False, False)
+        proxy_win.resizable(False,False)
         try:
             proxy_win.iconbitmap(ICON_PATH)
         except:
             pass
 
-        style3 = ttk.Style(proxy_win)
+        style3=ttk.Style(proxy_win)
         style3.theme_use("clam")
         style3.configure("ProxyFrame.TFrame", background="#FFFFFF")
         style3.configure("ProxyTitle.TLabel", background="#0066CC", foreground="white",
-                         font=("Helvetica", 13, "bold"))
+                         font=("Helvetica",13,"bold"))
         style3.configure("ProxyBody.TLabel", background="#FFFFFF", foreground="#333333",
-                         font=("Helvetica", 10))
-        style3.configure("ProxyButton.TButton", font=("Helvetica", 10), padding=5)
+                         font=("Helvetica",10))
+        style3.configure("ProxyButton.TButton", font=("Helvetica",10), padding=5)
 
-        header_frame = ttk.Frame(proxy_win, style="ProxyFrame.TFrame")
-        header_frame.pack(fill="x")
-        title_label = ttk.Label(header_frame, text="Cấu hình Proxy", style="ProxyTitle.TLabel")
-        title_label.pack(fill="x", pady=10, padx=10)
+        head=ttk.Frame(proxy_win, style="ProxyFrame.TFrame")
+        head.pack(fill="x")
+        lbl_title=ttk.Label(head, text="Cấu hình Proxy", style="ProxyTitle.TLabel")
+        lbl_title.pack(fill="x", pady=10, padx=10)
 
-        content_frame = ttk.Frame(proxy_win, style="ProxyFrame.TFrame", padding=10)
-        content_frame.pack(fill="both", expand=True)
+        body=ttk.Frame(proxy_win, style="ProxyFrame.TFrame", padding=10)
+        body.pack(fill="both", expand=True)
 
-        ttk.Label(content_frame, text="Nhập danh sách proxy (IP:Port:Protocol) mỗi dòng:",
+        ttk.Label(body, text="Nhập danh sách proxy (IP:Port:Protocol) mỗi dòng:",
                   style="ProxyBody.TLabel").pack(anchor="w")
-        self.proxy_text = scrolledtext.ScrolledText(content_frame, wrap=tk.WORD, width=55, height=10, font=("Helvetica", 9))
+        self.proxy_text=scrolledtext.ScrolledText(body, wrap=tk.WORD, width=55, height=10,
+                                                  font=("Helvetica",9))
         self.proxy_text.pack(pady=5)
 
-        self.rotate_var = tk.BooleanVar(value=global_proxy_manager.rotate_enabled)
-        rotate_check = ttk.Checkbutton(content_frame, text="Xoay vòng proxy sau mỗi vòng lặp", variable=self.rotate_var)
+        self.rotate_var=tk.BooleanVar(value=global_proxy_manager.rotate_enabled)
+        rotate_check=ttk.Checkbutton(body,text="Xoay vòng proxy sau mỗi vòng lặp",
+                                     variable=self.rotate_var)
         rotate_check.pack(anchor="w", pady=5)
 
-        button_frame = ttk.Frame(content_frame)
-        button_frame.pack(pady=5)
+        bf=ttk.Frame(body)
+        bf.pack(pady=5)
 
-        load_btn = ttk.Button(button_frame, text="Lưu Proxy", style="ProxyButton.TButton",
-                              command=self.save_proxy_list)
-        load_btn.grid(row=0, column=0, padx=5)
+        btn_save=ttk.Button(bf, text="Lưu Proxy", style="ProxyButton.TButton",
+                            command=self.save_proxy_list)
+        btn_save.grid(row=0,column=0,padx=5)
 
-        checkip_btn = ttk.Button(button_frame, text="Check IP", style="ProxyButton.TButton",
-                                 command=self.check_ip_func)
-        checkip_btn.grid(row=0, column=1, padx=5)
+        btn_chk=ttk.Button(bf, text="Check IP", style="ProxyButton.TButton",
+                           command=self.check_ip_func)
+        btn_chk.grid(row=0,column=1,padx=5)
 
-        close_btn = ttk.Button(button_frame, text="Đóng", style="ProxyButton.TButton",
-                               command=proxy_win.destroy)
-        close_btn.grid(row=0, column=2, padx=5)
+        btn_close=ttk.Button(bf, text="Đóng", style="ProxyButton.TButton",
+                             command=proxy_win.destroy)
+        btn_close.grid(row=0,column=2,padx=5)
 
-        # Load sẵn proxy cũ
-        lines = []
-        for (ip, port, protocol) in global_proxy_manager.proxy_list:
-            lines.append(f"{ip}:{port}:{protocol}")
+        # Proxy cũ
+        lines=[]
+        for (ip,port,prot) in global_proxy_manager.proxy_list:
+            lines.append(f"{ip}:{port}:{prot}")
         self.proxy_text.insert(tk.END, "\n".join(lines))
 
     def save_proxy_list(self):
-        text_data = self.proxy_text.get("1.0", tk.END)
+        text_data=self.proxy_text.get("1.0", tk.END)
         global_proxy_manager.load_from_text(text_data)
-        global_proxy_manager.rotate_enabled = self.rotate_var.get()
-        self.log(f"Đã lưu {len(global_proxy_manager.proxy_list)} proxy. Xoay vòng = {global_proxy_manager.rotate_enabled}")
+        global_proxy_manager.rotate_enabled=self.rotate_var.get()
+        self.log(f"Đã lưu {len(global_proxy_manager.proxy_list)} proxy, Xoay = {global_proxy_manager.rotate_enabled}")
 
     def check_ip_func(self):
-        current_ip = check_ip_current()
-        self.log(f"IP hiện tại: {current_ip}")
+        ip=check_ip_current()
+        self.log(f"IP hiện tại: {ip}")
 
 
 def main():
-    root = tk.Tk()
-    gui = AutomationGUI(root)
+    root=tk.Tk()
+    gui=AutomationGUI(root)
     root.mainloop()
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()

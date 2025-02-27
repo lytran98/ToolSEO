@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['hi.py'],
+    ['toolseo.py'],
     pathex=[],
     binaries=[],
     datas=[('chromedriver.exe', '.'), ('lytran.ico', '.'), ('lytran.jpg', '.')],
@@ -29,7 +29,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
