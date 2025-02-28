@@ -35,7 +35,9 @@
 ---
 ## **Tả xuống công cụ có sẵn**
 
-🔹 Vào thư mục **dist** -> **ToolSEO.exe** tải về và sử dụng thôi!
+![image](https://github.com/user-attachments/assets/1fead9dd-5ffb-45a0-bac9-f039e21440c0)
+
+![image](https://github.com/user-attachments/assets/a3f1bc75-8f98-402f-9230-11c37c89acb4)
 
 ---
 
