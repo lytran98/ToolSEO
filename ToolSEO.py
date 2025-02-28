@@ -149,18 +149,18 @@ def search_keyword_only(driver, log, keyword, max_pages):
     close_location_popup(driver)
 
     for page in range(1, max_pages+1):
-        log(f"Trang {page} => cuộn, không bấm vào.")
+        log(f"Trang {page} => cuộn xem, không bấm vào.")
         time.sleep(2)
         scroll_like_user(driver,5)
         nxt=driver.find_elements(By.XPATH,"//a[@id='pnnext']")
         if nxt:
             nxt[0].click()
         else:
-            log("Hết trang => dừng 'Chỉ tìm khoá'.")
+            log("Hết trang => dừng 'Chỉ tìm từ khoá'.")
             break
 
 def search_exact_url(driver, log, keyword, exact_url, max_pages, read_time=60):
-    log(f"Tìm link: {exact_url}, max_pages={max_pages}")
+    log(f"Tìm link: {exact_url}, số trang tìm: {max_pages}")
     driver.get("https://www.google.com")
     close_location_popup(driver)
 
@@ -172,7 +172,7 @@ def search_exact_url(driver, log, keyword, exact_url, max_pages, read_time=60):
 
     found=False
     for page in range(1, max_pages+1):
-        log(f"Trang {page}, link.")
+        log(f"Trang {page}, đang tìm link...")
         time.sleep(2)
         scroll_like_user(driver,5)
 
@@ -194,7 +194,7 @@ def search_exact_url(driver, log, keyword, exact_url, max_pages, read_time=60):
                 driver.execute_script("window.scrollBy(0,500);")
                 time.sleep(2)
             found=True
-            log("Đã đọc link xong, dừng.")
+            log("Đã đọc xong, dừng.")
             break
         else:
             nxt=driver.find_elements(By.XPATH,"//a[@id='pnnext']")
@@ -207,7 +207,7 @@ def search_exact_url(driver, log, keyword, exact_url, max_pages, read_time=60):
         log("Kết thúc => không tìm thấy link.")
 
 def search_domain(driver, log, keyword, domain, max_pages, read_time=60):
-    log(f"Tìm tên miền '{domain}', max_pages={max_pages}")
+    log(f"Tìm tên miền '{domain}', số trang tìm: {max_pages}")
     driver.get("https://www.google.com")
     close_location_popup(driver)
 
@@ -219,7 +219,7 @@ def search_domain(driver, log, keyword, domain, max_pages, read_time=60):
 
     found=False
     for page in range(1, max_pages+1):
-        log(f"Trang {page}, tên miền.")
+        log(f"Trang {page}, đang tìm tên miền...")
         time.sleep(2)
         scroll_like_user(driver,5)
 
@@ -241,7 +241,7 @@ def search_domain(driver, log, keyword, domain, max_pages, read_time=60):
                 driver.execute_script("window.scrollBy(0,500);")
                 time.sleep(2)
             found=True
-            log("Đã đọc tên miền => dừng.")
+            log("Đã đọc xong => dừng.")
             break
         else:
             nxt=driver.find_elements(By.XPATH,"//a[@id='pnnext']")
@@ -344,7 +344,7 @@ class AutomationThread(threading.Thread):
             finally:
                 driver.quit()
 
-            self.log(f"⏳ Vòng {current_loop} xong, nghỉ {self.loop_delay}s...")
+            self.log(f"⏳ Vòng {current_loop} xong, nghỉ {self.loop_delay} giây...")
             for _ in range(self.loop_delay):
                 if self.stop_event.is_set():
                     break
@@ -480,7 +480,7 @@ class AutomationGUI:
 
         tk.Label(setting_lf, text="Thời gian nghỉ:", bg="#f0f0f0", font=("Helvetica",10))\
             .grid(row=row_s, column=0, sticky="e", padx=5, pady=3)
-        self.loop_delay_var=tk.StringVar(value="30")
+        self.loop_delay_var=tk.StringVar(value="120")
         tk.Entry(setting_lf, textvariable=self.loop_delay_var, width=5, font=("Helvetica",10))\
             .grid(row=row_s, column=1, sticky="w", padx=5, pady=3)
         row_s+=1
@@ -645,13 +645,13 @@ class AutomationGUI:
         self.target_var.set("")
         self.max_pages_var.set("5")
         self.read_time_var.set("45")
-        self.loop_delay_var.set("30")
+        self.loop_delay_var.set("120")
         self.loop_count_var.set("0")
         self.win_w_var.set("740")
         self.win_h_var.set("740")
         self.headless_var.set(False)
 
-        self.log("Đã khôi phục form mặc định.")
+        self.log("Đã khôi phục về mặc định.")
         self.update_ui()
 
     def show_info(self):
